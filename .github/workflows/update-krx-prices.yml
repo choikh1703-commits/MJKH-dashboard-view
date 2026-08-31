@@ -1,8 +1,6 @@
 name: Update encrypted KRX prices
 
 on:
-  schedule:
-    - cron: '*/5 0-6 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -26,13 +24,17 @@ jobs:
           PORTFOLIO_PRICE_CODES: ${{ secrets.PORTFOLIO_PRICE_CODES }}
           PORTFOLIO_DASHBOARD_PASSPHRASE: ${{ secrets.PORTFOLIO_DASHBOARD_PASSPHRASE }}
           FORCE_UPDATE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          PRICE_OUTPUT_PATH: ${{ runner.temp }}/prices.enc.json
       - name: Publish encrypted price file
         shell: bash
         run: |
-          if [ ! -f prices.enc.json ]; then
+          if [ ! -f "${RUNNER_TEMP}/prices.enc.json" ]; then
             echo "No in-session price file was generated."
             exit 0
           fi
+          git fetch origin live-prices
+          git switch live-prices
+          cp "${RUNNER_TEMP}/prices.enc.json" prices.enc.json
           git config user.name "Codex Portfolio Price Feed"
           git config user.email "choikh1703-commits@users.noreply.github.com"
           git add -- prices.enc.json
