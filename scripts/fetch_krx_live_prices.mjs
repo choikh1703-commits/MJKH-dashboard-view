@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const passphrase = process.env.PORTFOLIO_DASHBOARD_PASSPHRASE;
 const rawCodes = process.env.PORTFOLIO_PRICE_CODES;
+const rawBook = process.env.PORTFOLIO_LIVE_BOOK;
 const force = process.env.FORCE_UPDATE === '1';
 
 if (!passphrase || passphrase.length < 12) {
@@ -14,6 +15,17 @@ if (!rawCodes) throw new Error('PORTFOLIO_PRICE_CODES is required.');
 const parsedCodes = JSON.parse(rawCodes);
 const codes = [...new Set(parsedCodes.map((code) => String(code).padStart(6, '0')))].filter((code) => /^\d{6}$/.test(code));
 if (!codes.length || codes.length !== parsedCodes.length) throw new Error('PORTFOLIO_PRICE_CODES contains an invalid code.');
+const book = rawBook ? JSON.parse(rawBook) : null;
+if (book) {
+  if (!Array.isArray(book.holdings) || !Number.isFinite(Number(book.cash)) || !Number.isFinite(Number(book.cashIncome))) {
+    throw new Error('PORTFOLIO_LIVE_BOOK is invalid.');
+  }
+  for (const holding of book.holdings) {
+    if (!/^\d{6}$/.test(String(holding.code)) || !Number.isFinite(Number(holding.quantity))) {
+      throw new Error('PORTFOLIO_LIVE_BOOK contains an invalid holding.');
+    }
+  }
+}
 
 const now = new Date();
 const kst = kstParts(now);
@@ -34,6 +46,7 @@ const payload = {
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
   source: 'NAVER_KRX_REGULAR',
   scope: 'KRX regular market only; NXT and integrated prices excluded',
+  book,
   items,
 };
 
