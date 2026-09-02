@@ -38,7 +38,10 @@ if (!force && !inRegularSession) {
   process.exit(0);
 }
 
-const items = await Promise.all(codes.map(fetchKrxQuote));
+const [items, indices] = await Promise.all([
+  Promise.all(codes.map(fetchKrxQuote)),
+  Promise.all(['KOSPI', 'KOSDAQ'].map(fetchKrxIndex)),
+]);
 const payload = {
   version: 1,
   generatedAt: now.toISOString(),
@@ -48,6 +51,7 @@ const payload = {
   scope: 'KRX regular market only; NXT and integrated prices excluded',
   book,
   items,
+  indices,
 };
 
 const envelope = encryptJson(payload, passphrase);
@@ -90,6 +94,36 @@ async function fetchKrxQuote(code) {
     tradedAt: quote.localTradedAt || null,
     marketStatus: quote.marketStatus || 'UNKNOWN',
     exchange,
+  };
+}
+
+async function fetchKrxIndex(code) {
+  const response = await fetch(`https://polling.finance.naver.com/api/realtime/domestic/index/${code}`, {
+    headers: {
+      accept: 'application/json',
+      'user-agent': 'MJKH-Portfolio-Dashboard/1.0',
+    },
+  });
+  if (!response.ok) throw new Error(`KRX index request failed for ${code}: HTTP ${response.status}`);
+  const body = await response.json();
+  const quote = body?.datas?.[0];
+  if (!quote || quote.itemCode !== code) throw new Error(`Invalid KRX index payload for ${code}.`);
+
+  const price = Number(quote.closePriceRaw);
+  const change = Number(quote.compareToPreviousClosePriceRaw);
+  const previousClose = price - change;
+  const returnRate = Number(quote.fluctuationsRatioRaw) / 100;
+  if (![price, previousClose, change, returnRate].every(Number.isFinite) || price <= 0 || previousClose <= 0) {
+    throw new Error(`Non-numeric KRX index quote for ${code}.`);
+  }
+  return {
+    code,
+    price,
+    previousClose,
+    change,
+    return: returnRate,
+    tradedAt: quote.localTradedAt || null,
+    marketStatus: quote.marketStatus || 'UNKNOWN',
   };
 }
 
