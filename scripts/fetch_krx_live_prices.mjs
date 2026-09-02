@@ -21,7 +21,7 @@ if (book) {
     throw new Error('PORTFOLIO_LIVE_BOOK is invalid.');
   }
   for (const holding of book.holdings) {
-    if (!/^\d{6}$/.test(String(holding.code)) || !Number.isFinite(Number(holding.quantity))) {
+    if (!/^\d{6}$/.test(String(holding.code)) || !Number.isFinite(Number(holding.quantity)) || !Number.isFinite(Number(holding.costBasis))) {
       throw new Error('PORTFOLIO_LIVE_BOOK contains an invalid holding.');
     }
   }
