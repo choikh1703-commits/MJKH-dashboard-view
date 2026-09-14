@@ -29,12 +29,12 @@ if (book) {
 
 const now = new Date();
 const kst = kstParts(now);
-const inRegularSession = kst.weekday >= 1 && kst.weekday <= 5
-  && kst.minutes >= 9 * 60
-  && kst.minutes <= 15 * 60 + 30;
+const inMarketSession = kst.weekday >= 1 && kst.weekday <= 5
+  && kst.minutes >= 8 * 60
+  && kst.minutes <= 20 * 60 + 10;
 
-if (!force && !inRegularSession) {
-  console.log(JSON.stringify({ status: 'skipped', reason: 'outside_krx_regular_session', kst: kst.label }));
+if (!force && !inMarketSession) {
+  console.log(JSON.stringify({ status: 'skipped', reason: 'outside_krx_nxt_session', kst: kst.label }));
   process.exit(0);
 }
 
@@ -43,12 +43,12 @@ const [items, indices] = await Promise.all([
   Promise.all(['KOSPI', 'KOSDAQ'].map(fetchKrxIndex)),
 ]);
 const payload = {
-  version: 1,
+  version: 2,
   generatedAt: now.toISOString(),
   koreaDate: kst.date,
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
-  source: 'NAVER_KRX_REGULAR',
-  scope: 'KRX regular market only; NXT and integrated prices excluded',
+  source: 'NAVER_KRX_NXT_SESSION',
+  scope: 'KRX regular close plus NXT pre-market and after-market quotes when available',
   book,
   items,
   indices,
@@ -76,12 +76,12 @@ async function fetchKrxQuote(code) {
     throw new Error(`Unexpected exchange for ${code}: ${exchange}`);
   }
 
-  // Deliberately read top-level KRX fields only. overMarketPriceInfo is NXT and
-  // integratedPriceInfo combines markets, so both are excluded from this feed.
-  const price = Number(quote.closePriceRaw);
-  const previousClose = Number(quote.closePriceRaw) - Number(quote.compareToPreviousClosePriceRaw);
-  const change = Number(quote.compareToPreviousClosePriceRaw);
-  const returnRate = Number(quote.fluctuationsRatioRaw) / 100;
+  const alternate = normalizeNxtQuote(quote.overMarketPriceInfo);
+  const useNxt = alternate && ['PRE_MARKET', 'AFTER_MARKET'].includes(alternate.session);
+  const price = useNxt ? alternate.price : Number(quote.closePriceRaw);
+  const change = useNxt ? alternate.change : Number(quote.compareToPreviousClosePriceRaw);
+  const previousClose = price - change;
+  const returnRate = useNxt ? alternate.returnRate : Number(quote.fluctuationsRatioRaw) / 100;
   if (![price, previousClose, change, returnRate].every(Number.isFinite) || price <= 0 || previousClose <= 0) {
     throw new Error(`Non-numeric KRX quote for ${code}.`);
   }
@@ -91,10 +91,37 @@ async function fetchKrxQuote(code) {
     previousClose,
     change,
     return: returnRate,
-    tradedAt: quote.localTradedAt || null,
-    marketStatus: quote.marketStatus || 'UNKNOWN',
+    tradedAt: useNxt ? alternate.tradedAt : quote.localTradedAt || null,
+    marketStatus: useNxt ? alternate.marketStatus : quote.marketStatus || 'UNKNOWN',
     exchange,
+    priceMarket: useNxt ? 'NXT' : 'KRX',
+    session: useNxt ? alternate.session : krxSession(quote.marketStatus),
+    nxtEligible: Boolean(alternate),
   };
+}
+
+function normalizeNxtQuote(overMarket) {
+  if (!overMarket || !['PRE_MARKET', 'AFTER_MARKET'].includes(overMarket.tradingSessionType)) return null;
+  const price = numeric(overMarket.overPrice);
+  const change = numeric(overMarket.compareToPreviousClosePrice);
+  const returnRate = numeric(overMarket.fluctuationsRatio) / 100;
+  if (![price, change, returnRate].every(Number.isFinite) || price <= 0 || price - change <= 0) return null;
+  return {
+    price,
+    change,
+    returnRate,
+    tradedAt: overMarket.localTradedAt || null,
+    marketStatus: overMarket.overMarketStatus || 'UNKNOWN',
+    session: overMarket.tradingSessionType,
+  };
+}
+
+function numeric(value) {
+  return Number(String(value ?? '').replaceAll(',', '').trim());
+}
+
+function krxSession(status) {
+  return status === 'OPEN' ? 'KRX_REGULAR' : 'KRX_CLOSE';
 }
 
 async function fetchKrxIndex(code) {

@@ -1,7 +1,9 @@
-name: Update encrypted KRX prices
+name: Store encrypted KRX NXT final prices
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '10 11 * * 1-5'
 
 permissions:
   contents: write
@@ -18,12 +20,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Fetch KRX regular-market prices
+      - name: Fetch KRX and NXT final-session prices
         run: node scripts/fetch_krx_live_prices.mjs
         env:
           PORTFOLIO_PRICE_CODES: ${{ secrets.PORTFOLIO_PRICE_CODES }}
           PORTFOLIO_DASHBOARD_PASSPHRASE: ${{ secrets.PORTFOLIO_DASHBOARD_PASSPHRASE }}
-          FORCE_UPDATE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          FORCE_UPDATE: '1'
           PRICE_OUTPUT_PATH: ${{ runner.temp }}/prices.enc.json
       - name: Publish encrypted price file
         shell: bash
@@ -42,5 +44,5 @@ jobs:
             echo "No price change."
             exit 0
           fi
-          git commit -m "chore: update encrypted KRX prices"
+          git commit -m "chore: store encrypted KRX NXT final prices"
           git push
