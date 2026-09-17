@@ -48,7 +48,7 @@ const payload = {
   koreaDate: kst.date,
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
   source: 'NAVER_KRX_NXT_SESSION',
-  scope: 'KRX regular close plus NXT pre-market and after-market quotes when available',
+  scope: 'NXT pre-market, KRX regular, NXT 15:30-16:00, and KRX after-market from 16:00',
   book,
   items,
   indices,
@@ -77,7 +77,7 @@ async function fetchKrxQuote(code) {
   }
 
   const alternate = normalizeNxtQuote(quote.overMarketPriceInfo);
-  const useNxt = alternate && ['PRE_MARKET', 'AFTER_MARKET'].includes(alternate.session);
+  const useNxt = shouldUseNxt(alternate, now);
   const price = useNxt ? alternate.price : Number(quote.closePriceRaw);
   const change = useNxt ? alternate.change : Number(quote.compareToPreviousClosePriceRaw);
   const previousClose = price - change;
@@ -95,7 +95,7 @@ async function fetchKrxQuote(code) {
     marketStatus: useNxt ? alternate.marketStatus : quote.marketStatus || 'UNKNOWN',
     exchange,
     priceMarket: useNxt ? 'NXT' : 'KRX',
-    session: useNxt ? alternate.session : krxSession(quote.marketStatus),
+    session: useNxt ? alternate.session : krxSession(quote),
     nxtEligible: Boolean(alternate),
   };
 }
@@ -120,8 +120,25 @@ function numeric(value) {
   return Number(String(value ?? '').replaceAll(',', '').trim());
 }
 
-function krxSession(status) {
-  return status === 'OPEN' ? 'KRX_REGULAR' : 'KRX_CLOSE';
+function shouldUseNxt(alternate, date = new Date()) {
+  if (!alternate) return false;
+  const phase = marketPhase(kstParts(date));
+  return (alternate.session === 'PRE_MARKET' && phase === 'NXT_PRE_MARKET')
+    || (alternate.session === 'AFTER_MARKET' && phase === 'NXT_AFTER_MARKET');
+}
+
+function marketPhase(kst) {
+  if (kst.weekday < 1 || kst.weekday > 5) return 'CLOSED';
+  if (kst.minutes >= 8 * 60 && kst.minutes < 9 * 60) return 'NXT_PRE_MARKET';
+  if (kst.minutes >= 9 * 60 && kst.minutes < 15 * 60 + 30) return 'KRX_REGULAR';
+  if (kst.minutes >= 15 * 60 + 30 && kst.minutes < 16 * 60) return 'NXT_AFTER_MARKET';
+  if (kst.minutes >= 16 * 60 && kst.minutes <= 20 * 60 + 10) return 'KRX_AFTER_MARKET';
+  return 'CLOSED';
+}
+
+function krxSession(quote) {
+  if (quote.marketSessionType === 'afterMarket') return 'KRX_AFTER_MARKET';
+  return quote.marketStatus === 'OPEN' ? 'KRX_REGULAR' : 'KRX_CLOSE';
 }
 
 async function fetchKrxIndex(code) {
