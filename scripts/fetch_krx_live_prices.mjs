@@ -42,10 +42,14 @@ const [items, indices] = await Promise.all([
   Promise.all(codes.map(fetchKrxQuote)),
   Promise.all(['KOSPI', 'KOSDAQ'].map(fetchKrxIndex)),
 ]);
+const tradedDates = [...new Set(items.map((item) => kstDate(item.tradedAt)).filter(Boolean))];
+const snapshotDate = kst.minutes < 8 * 60 && tradedDates.length === 1 && tradedDates[0] < kst.date
+  ? tradedDates[0]
+  : kst.date;
 const payload = {
   version: 2,
   generatedAt: now.toISOString(),
-  koreaDate: kst.date,
+  koreaDate: snapshotDate,
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
   source: 'NAVER_KRX_NXT_SESSION',
   scope: 'NXT pre-market, KRX regular, NXT 15:30-16:00, and KRX after-market from 16:00',
@@ -209,4 +213,13 @@ function kstParts(date) {
     date: `${parts.year}-${parts.month}-${parts.day}`,
     label: `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} KST`,
   };
+}
+
+function kstDate(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
