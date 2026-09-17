@@ -52,7 +52,7 @@ const payload = {
   koreaDate: snapshotDate,
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
   source: 'NAVER_KRX_NXT_SESSION',
-  scope: 'NXT pre-market, KRX regular, NXT 15:30-16:00, and KRX after-market from 16:00',
+  scope: 'Reference quote only: NXT pre-market, KRX regular, NXT 15:30-16:00, KRX 16:00-20:00; KRX regular close after 20:00',
   book,
   items,
   indices,
@@ -64,12 +64,15 @@ await writeFile(outputPath, JSON.stringify(envelope), 'utf8');
 console.log(JSON.stringify({ status: 'updated', output: outputPath, generatedAt: payload.generatedAt, count: items.length }));
 
 async function fetchKrxQuote(code) {
-  const response = await fetch(`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`, {
-    headers: {
-      accept: 'application/json',
-      'user-agent': 'MJKH-Portfolio-Dashboard/1.0',
-    },
-  });
+  const [response, regular] = await Promise.all([
+    fetch(`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`, {
+      headers: {
+        accept: 'application/json',
+        'user-agent': 'MJKH-Portfolio-Dashboard/1.0',
+      },
+    }),
+    fetchRegularClose(code),
+  ]);
   if (!response.ok) throw new Error(`KRX quote request failed for ${code}: HTTP ${response.status}`);
   const body = await response.json();
   const quote = body?.datas?.[0];
@@ -82,10 +85,12 @@ async function fetchKrxQuote(code) {
 
   const alternate = normalizeNxtQuote(quote.overMarketPriceInfo);
   const useNxt = shouldUseNxt(alternate, now);
-  const price = useNxt ? alternate.price : Number(quote.closePriceRaw);
-  const change = useNxt ? alternate.change : Number(quote.compareToPreviousClosePriceRaw);
-  const previousClose = price - change;
-  const returnRate = useNxt ? alternate.returnRate : Number(quote.fluctuationsRatioRaw) / 100;
+  const phase = marketPhase(kst);
+  const useRegularClose = phase === 'CLOSED';
+  const price = useNxt ? alternate.price : useRegularClose ? regular.close : Number(quote.closePriceRaw);
+  const change = useNxt ? alternate.change : useRegularClose ? regular.close - regular.previousClose : Number(quote.compareToPreviousClosePriceRaw);
+  const previousClose = useRegularClose ? regular.previousClose : price - change;
+  const returnRate = useNxt ? alternate.returnRate : useRegularClose ? price / previousClose - 1 : Number(quote.fluctuationsRatioRaw) / 100;
   if (![price, previousClose, change, returnRate].every(Number.isFinite) || price <= 0 || previousClose <= 0) {
     throw new Error(`Non-numeric KRX quote for ${code}.`);
   }
@@ -95,13 +100,32 @@ async function fetchKrxQuote(code) {
     previousClose,
     change,
     return: returnRate,
-    tradedAt: useNxt ? alternate.tradedAt : quote.localTradedAt || null,
-    marketStatus: useNxt ? alternate.marketStatus : quote.marketStatus || 'UNKNOWN',
+    tradedAt: useNxt ? alternate.tradedAt : useRegularClose ? `${regular.date}T15:30:00+09:00` : quote.localTradedAt || null,
+    marketStatus: useNxt ? alternate.marketStatus : useRegularClose ? 'CLOSE' : quote.marketStatus || 'UNKNOWN',
     exchange,
     priceMarket: useNxt ? 'NXT' : 'KRX',
-    session: useNxt ? alternate.session : krxSession(quote),
+    session: useNxt ? alternate.session : useRegularClose ? 'KRX_CLOSE' : krxSession(quote),
     nxtEligible: Boolean(alternate),
+    regularClose: regular.close,
+    regularPreviousClose: regular.previousClose,
+    regularCloseDate: regular.date,
   };
+}
+
+async function fetchRegularClose(code) {
+  const response = await fetch(`https://m.stock.naver.com/api/stock/${code}/price?pageSize=4&page=1`, {
+    headers: { accept: 'application/json', 'user-agent': 'MJKH-Portfolio-Dashboard/1.0' },
+  });
+  if (!response.ok) throw new Error(`KRX daily-price request failed for ${code}: HTTP ${response.status}`);
+  const rows = await response.json();
+  const completedToday = kst.weekday >= 1 && kst.weekday <= 5 && kst.minutes >= 15 * 60 + 30;
+  const normalized = rows.map((row) => ({ date: row.localTradedAt, close: numeric(row.closePrice) }))
+    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && Number.isFinite(row.close) && row.close > 0);
+  const index = normalized.findIndex((row) => completedToday ? row.date <= kst.date : row.date < kst.date);
+  const selected = normalized[index];
+  const previous = normalized.slice(index + 1).find((row) => row.date < selected?.date);
+  if (!selected || !previous) throw new Error(`Invalid regular close for ${code}.`);
+  return { date: selected.date, close: selected.close, previousClose: previous.close };
 }
 
 function normalizeNxtQuote(overMarket) {
@@ -136,7 +160,7 @@ function marketPhase(kst) {
   if (kst.minutes >= 8 * 60 && kst.minutes < 9 * 60) return 'NXT_PRE_MARKET';
   if (kst.minutes >= 9 * 60 && kst.minutes < 15 * 60 + 30) return 'KRX_REGULAR';
   if (kst.minutes >= 15 * 60 + 30 && kst.minutes < 16 * 60) return 'NXT_AFTER_MARKET';
-  if (kst.minutes >= 16 * 60 && kst.minutes <= 20 * 60 + 10) return 'KRX_AFTER_MARKET';
+  if (kst.minutes >= 16 * 60 && kst.minutes < 20 * 60) return 'KRX_AFTER_MARKET';
   return 'CLOSED';
 }
 
