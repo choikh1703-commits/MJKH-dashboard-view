@@ -113,19 +113,31 @@ async function fetchKrxQuote(code) {
 }
 
 async function fetchRegularClose(code) {
-  const response = await fetch(`https://m.stock.naver.com/api/stock/${code}/price?pageSize=4&page=1`, {
+  const response = await fetch(`https://api.stock.naver.com/chart/domestic/item/${code}?periodType=day`, {
     headers: { accept: 'application/json', 'user-agent': 'MJKH-Portfolio-Dashboard/1.0' },
   });
-  if (!response.ok) throw new Error(`KRX daily-price request failed for ${code}: HTTP ${response.status}`);
-  const rows = await response.json();
+  if (!response.ok) throw new Error(`KRX chart request failed for ${code}: HTTP ${response.status}`);
+  const chart = await response.json();
   const completedToday = kst.weekday >= 1 && kst.weekday <= 5 && kst.minutes >= 15 * 60 + 30;
-  const normalized = rows.map((row) => ({ date: row.localTradedAt, close: numeric(row.closePrice) }))
-    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && Number.isFinite(row.close) && row.close > 0);
-  const index = normalized.findIndex((row) => completedToday ? row.date <= kst.date : row.date < kst.date);
-  const selected = normalized[index];
-  const previous = normalized.slice(index + 1).find((row) => row.date < selected?.date);
-  if (!selected || !previous) throw new Error(`Invalid regular close for ${code}.`);
-  return { date: selected.date, close: selected.close, previousClose: previous.close };
+  const tradeDate = normalizeDate(chart.tradeBaseAt);
+  const lastDate = normalizeDate(chart.lastTradeBaseAt);
+  const lastClose = Number(chart.lastClosePrice);
+  if (!tradeDate || !lastDate || !Number.isFinite(lastClose) || lastClose <= 0) throw new Error(`Invalid KRX chart for ${code}.`);
+  if (tradeDate < kst.date || completedToday) {
+    const cutoff = `${tradeDate.replaceAll('-', '')}153000`;
+    const point = [...(chart.priceInfos || [])]
+      .filter((item) => String(item.localDateTime || '').startsWith(tradeDate.replaceAll('-', '')) && String(item.localDateTime || '') <= cutoff)
+      .sort((left, right) => String(left.localDateTime).localeCompare(String(right.localDateTime)))
+      .at(-1);
+    const close = Number(point?.currentPrice);
+    if (Number.isFinite(close) && close > 0) return { date: tradeDate, close, previousClose: lastClose };
+  }
+  return { date: lastDate, close: lastClose, previousClose: lastClose };
+}
+
+function normalizeDate(value) {
+  const match = String(value || '').match(/^(\d{4})[-.]?(\d{2})[-.]?(\d{2})/);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
 }
 
 function normalizeNxtQuote(overMarket) {
