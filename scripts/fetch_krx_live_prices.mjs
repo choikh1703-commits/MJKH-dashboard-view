@@ -1,5 +1,5 @@
-import { createCipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const passphrase = process.env.PORTFOLIO_DASHBOARD_PASSPHRASE;
@@ -15,6 +15,14 @@ if (!rawCodes) throw new Error('PORTFOLIO_PRICE_CODES is required.');
 const parsedCodes = JSON.parse(rawCodes);
 const codes = [...new Set(parsedCodes.map((code) => String(code).padStart(6, '0')))].filter((code) => /^\d{6}$/.test(code));
 if (!codes.length || codes.length !== parsedCodes.length) throw new Error('PORTFOLIO_PRICE_CODES contains an invalid code.');
+const dashboardCodes = await readDashboardCodes(passphrase);
+const configured = new Set(codes);
+const dashboard = new Set(dashboardCodes);
+const missingCount = dashboardCodes.filter((code) => !configured.has(code)).length;
+const extraCount = codes.filter((code) => !dashboard.has(code)).length;
+if (missingCount || extraCount) {
+  throw new Error(`PORTFOLIO_PRICE_CODES does not match the encrypted dashboard holdings (missing ${missingCount}, extra ${extraCount}); no partial snapshot was written.`);
+}
 const book = rawBook ? JSON.parse(rawBook) : null;
 if (book) {
   if (!Array.isArray(book.holdings) || !Number.isFinite(Number(book.cash)) || !Number.isFinite(Number(book.cashIncome))) {
@@ -229,6 +237,47 @@ function encryptJson(value, password) {
     iv: iv.toString('base64'),
     ciphertext: ciphertext.toString('base64'),
   };
+}
+
+async function readDashboardCodes(password) {
+  const source = await readFile('index.html', 'utf8');
+  const match = source.match(/const payload = (\{[^\n]+\});/);
+  if (!match) throw new Error('Encrypted dashboard payload was not found.');
+  const envelope = JSON.parse(match[1]);
+  const key = pbkdf2Sync(password, Buffer.from(envelope.salt, 'base64'), envelope.iterations, 32, 'sha256');
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'));
+  const encrypted = Buffer.from(envelope.ciphertext, 'base64');
+  decipher.setAuthTag(encrypted.subarray(-16));
+  const plaintext = Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString('utf8');
+  const marker = plaintext.indexOf('})({');
+  if (marker < 0) throw new Error('Encrypted dashboard model was not found.');
+  const start = marker + 3;
+  const end = findJsonObjectEnd(plaintext, start);
+  const model = JSON.parse(plaintext.slice(start, end));
+  const codes = [...new Set((model.positions || []).map((position) => String(position.code).padStart(6, '0')))];
+  if (!codes.length || codes.some((code) => !/^\d{6}$/.test(code))) {
+    throw new Error('Encrypted dashboard holdings are invalid.');
+  }
+  return codes;
+}
+
+function findJsonObjectEnd(source, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{') depth += 1;
+    else if (character === '}' && --depth === 0) return index + 1;
+  }
+  throw new Error('Encrypted dashboard model JSON is incomplete.');
 }
 
 function kstParts(date) {
