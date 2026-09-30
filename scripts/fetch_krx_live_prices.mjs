@@ -3,26 +3,13 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const passphrase = process.env.PORTFOLIO_DASHBOARD_PASSPHRASE;
-const rawCodes = process.env.PORTFOLIO_PRICE_CODES;
 const rawBook = process.env.PORTFOLIO_LIVE_BOOK;
 const force = process.env.FORCE_UPDATE === '1';
 
 if (!passphrase || passphrase.length < 12) {
   throw new Error('PORTFOLIO_DASHBOARD_PASSPHRASE must contain at least 12 characters.');
 }
-if (!rawCodes) throw new Error('PORTFOLIO_PRICE_CODES is required.');
-
-const parsedCodes = JSON.parse(rawCodes);
-const codes = [...new Set(parsedCodes.map((code) => String(code).padStart(6, '0')))].filter((code) => /^\d{6}$/.test(code));
-if (!codes.length || codes.length !== parsedCodes.length) throw new Error('PORTFOLIO_PRICE_CODES contains an invalid code.');
-const dashboardCodes = await readDashboardCodes(passphrase);
-const configured = new Set(codes);
-const dashboard = new Set(dashboardCodes);
-const missingCount = dashboardCodes.filter((code) => !configured.has(code)).length;
-const extraCount = codes.filter((code) => !dashboard.has(code)).length;
-if (missingCount || extraCount) {
-  throw new Error(`PORTFOLIO_PRICE_CODES does not match the encrypted dashboard holdings (missing ${missingCount}, extra ${extraCount}); no partial snapshot was written.`);
-}
+const codes = await readDashboardCodes(passphrase);
 const book = rawBook ? JSON.parse(rawBook) : null;
 if (book) {
   if (!Array.isArray(book.holdings) || !Number.isFinite(Number(book.cash)) || !Number.isFinite(Number(book.cashIncome))) {
