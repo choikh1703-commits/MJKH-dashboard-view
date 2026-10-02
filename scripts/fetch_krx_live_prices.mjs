@@ -42,7 +42,7 @@ const snapshotDate = kst.minutes < 8 * 60 && tradedDates.length === 1 && tradedD
   ? tradedDates[0]
   : kst.date;
 const payload = {
-  version: 2,
+  version: 3,
   generatedAt: now.toISOString(),
   koreaDate: snapshotDate,
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
@@ -79,6 +79,20 @@ async function fetchKrxQuote(code) {
   }
 
   const alternate = normalizeNxtQuote(quote.overMarketPriceInfo);
+  const krxPrice = Number(quote.closePriceRaw);
+  const krxChange = Number(quote.compareToPreviousClosePriceRaw);
+  // Before the next regular session, the chart can repeat the latest close as
+  // its own comparison basis. The KRX daily change still carries the real prior close.
+  if (regular.previousClose === regular.close && kstDate(quote.localTradedAt) === regular.date
+      && krxPrice - krxChange > 0) regular.previousClose = krxPrice - krxChange;
+  const markets = {
+    krx: { price: krxPrice, previousClose: krxPrice - krxChange,
+      tradedAt: quote.localTradedAt || null, marketStatus: quote.marketStatus || 'UNKNOWN',
+      priceMarket: 'KRX', session: krxSession(quote) },
+    nxt: alternate ? { price: alternate.price, previousClose: alternate.price - alternate.change,
+      tradedAt: alternate.tradedAt, marketStatus: alternate.marketStatus,
+      priceMarket: 'NXT', session: alternate.session } : null,
+  };
   const useNxt = shouldUseNxt(alternate, now);
   const phase = marketPhase(kst);
   const useRegularClose = phase === 'CLOSED';
@@ -104,6 +118,7 @@ async function fetchKrxQuote(code) {
     regularClose: regular.close,
     regularPreviousClose: regular.previousClose,
     regularCloseDate: regular.date,
+    markets,
   };
 }
 
@@ -136,7 +151,7 @@ function normalizeDate(value) {
 }
 
 function normalizeNxtQuote(overMarket) {
-  if (!overMarket || !['PRE_MARKET', 'AFTER_MARKET'].includes(overMarket.tradingSessionType)) return null;
+  if (!overMarket || !overMarket.tradingSessionType) return null;
   const price = numeric(overMarket.overPrice);
   const change = numeric(overMarket.compareToPreviousClosePrice);
   const returnRate = numeric(overMarket.fluctuationsRatio) / 100;
