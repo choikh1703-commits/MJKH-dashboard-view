@@ -1,15 +1,20 @@
-import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { createCipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const passphrase = process.env.PORTFOLIO_DASHBOARD_PASSPHRASE;
+const rawCodes = process.env.PORTFOLIO_PRICE_CODES;
 const rawBook = process.env.PORTFOLIO_LIVE_BOOK;
 const force = process.env.FORCE_UPDATE === '1';
 
 if (!passphrase || passphrase.length < 12) {
   throw new Error('PORTFOLIO_DASHBOARD_PASSPHRASE must contain at least 12 characters.');
 }
-const codes = await readDashboardCodes(passphrase);
+if (!rawCodes) throw new Error('PORTFOLIO_PRICE_CODES is required.');
+
+const parsedCodes = JSON.parse(rawCodes);
+const codes = [...new Set(parsedCodes.map((code) => String(code).padStart(6, '0')))].filter((code) => /^\d{6}$/.test(code));
+if (!codes.length || codes.length !== parsedCodes.length) throw new Error('PORTFOLIO_PRICE_CODES contains an invalid code.');
 const book = rawBook ? JSON.parse(rawBook) : null;
 if (book) {
   if (!Array.isArray(book.holdings) || !Number.isFinite(Number(book.cash)) || !Number.isFinite(Number(book.cashIncome))) {
@@ -42,7 +47,7 @@ const snapshotDate = kst.minutes < 8 * 60 && tradedDates.length === 1 && tradedD
   ? tradedDates[0]
   : kst.date;
 const payload = {
-  version: 3,
+  version: 2,
   generatedAt: now.toISOString(),
   koreaDate: snapshotDate,
   marketStatus: items.every((item) => item.marketStatus === 'OPEN') ? 'OPEN' : items[0]?.marketStatus || 'UNKNOWN',
@@ -79,20 +84,6 @@ async function fetchKrxQuote(code) {
   }
 
   const alternate = normalizeNxtQuote(quote.overMarketPriceInfo);
-  const krxPrice = Number(quote.closePriceRaw);
-  const krxChange = Number(quote.compareToPreviousClosePriceRaw);
-  // Before the next regular session, the chart can repeat the latest close as
-  // its own comparison basis. The KRX daily change still carries the real prior close.
-  if (regular.previousClose === regular.close && kstDate(quote.localTradedAt) === regular.date
-      && krxPrice - krxChange > 0) regular.previousClose = krxPrice - krxChange;
-  const markets = {
-    krx: { price: krxPrice, previousClose: krxPrice - krxChange,
-      tradedAt: quote.localTradedAt || null, marketStatus: quote.marketStatus || 'UNKNOWN',
-      priceMarket: 'KRX', session: krxSession(quote) },
-    nxt: alternate ? { price: alternate.price, previousClose: alternate.price - alternate.change,
-      tradedAt: alternate.tradedAt, marketStatus: alternate.marketStatus,
-      priceMarket: 'NXT', session: alternate.session } : null,
-  };
   const useNxt = shouldUseNxt(alternate, now);
   const phase = marketPhase(kst);
   const useRegularClose = phase === 'CLOSED';
@@ -118,7 +109,6 @@ async function fetchKrxQuote(code) {
     regularClose: regular.close,
     regularPreviousClose: regular.previousClose,
     regularCloseDate: regular.date,
-    markets,
   };
 }
 
@@ -151,7 +141,7 @@ function normalizeDate(value) {
 }
 
 function normalizeNxtQuote(overMarket) {
-  if (!overMarket || !overMarket.tradingSessionType) return null;
+  if (!overMarket || !['PRE_MARKET', 'AFTER_MARKET'].includes(overMarket.tradingSessionType)) return null;
   const price = numeric(overMarket.overPrice);
   const change = numeric(overMarket.compareToPreviousClosePrice);
   const returnRate = numeric(overMarket.fluctuationsRatio) / 100;
@@ -239,47 +229,6 @@ function encryptJson(value, password) {
     iv: iv.toString('base64'),
     ciphertext: ciphertext.toString('base64'),
   };
-}
-
-async function readDashboardCodes(password) {
-  const source = await readFile('index.html', 'utf8');
-  const match = source.match(/const payload = (\{[^\n]+\});/);
-  if (!match) throw new Error('Encrypted dashboard payload was not found.');
-  const envelope = JSON.parse(match[1]);
-  const key = pbkdf2Sync(password, Buffer.from(envelope.salt, 'base64'), envelope.iterations, 32, 'sha256');
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'));
-  const encrypted = Buffer.from(envelope.ciphertext, 'base64');
-  decipher.setAuthTag(encrypted.subarray(-16));
-  const plaintext = Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString('utf8');
-  const marker = plaintext.indexOf('})({');
-  if (marker < 0) throw new Error('Encrypted dashboard model was not found.');
-  const start = marker + 3;
-  const end = findJsonObjectEnd(plaintext, start);
-  const model = JSON.parse(plaintext.slice(start, end));
-  const codes = [...new Set((model.positions || []).map((position) => String(position.code).padStart(6, '0')))];
-  if (!codes.length || codes.some((code) => !/^\d{6}$/.test(code))) {
-    throw new Error('Encrypted dashboard holdings are invalid.');
-  }
-  return codes;
-}
-
-function findJsonObjectEnd(source, start) {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = start; index < source.length; index += 1) {
-    const character = source[index];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-    if (character === '"') inString = true;
-    else if (character === '{') depth += 1;
-    else if (character === '}' && --depth === 0) return index + 1;
-  }
-  throw new Error('Encrypted dashboard model JSON is incomplete.');
 }
 
 function kstParts(date) {
